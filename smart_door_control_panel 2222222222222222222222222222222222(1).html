@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم الباب الذكي | Smart Door</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Cairo', sans-serif; background-color: #f3f4f6; }
+        .btn-pulse { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+            70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="bg-blue-600 p-6 text-center">
+            <h1 class="text-3xl font-bold text-white mb-2">الباب الذكي IoT</h1>
+            <p class="text-blue-200 text-sm">نظام تحكم عبر HiveMQ</p>
+        </div>
+        
+        <div class="p-6">
+            <!-- Connection Status -->
+            <div class="flex items-center justify-between mb-6 bg-gray-50 p-3 rounded-lg border">
+                <span class="text-gray-700 font-semibold">حالة السيرفر:</span>
+                <span id="mqtt-status" class="flex items-center text-red-500 font-bold">
+                    <span class="w-3 h-3 rounded-full bg-red-500 mr-2 ml-2"></span> غير متصل
+                </span>
+            </div>
+
+            <!-- Door Status -->
+            <div class="text-center mb-8">
+                <div class="text-gray-500 mb-1">حالة الباب الحالية</div>
+                <div id="door-status" class="text-2xl font-bold text-gray-800 bg-gray-100 py-3 rounded-xl">جاري التحميل...</div>
+            </div>
+
+            <!-- Controls -->
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <button onclick="sendCommand('OPEN')" id="btn-open" class="bg-green-500 hover:bg-green-600 text-white font-bold py-4 rounded-xl shadow-lg transition-all transform hover:-translate-y-1 disabled:opacity-50">
+                    <svg class="w-8 h-8 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+                    فتح الباب
+                </button>
+                <button onclick="sendCommand('CLOSE')" id="btn-close" class="bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-xl shadow-lg transition-all transform hover:-translate-y-1 disabled:opacity-50">
+                    <svg class="w-8 h-8 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+                    غلق الباب
+                </button>
+            </div>
+            
+            <button onclick="sendCommand('STOP')" id="btn-stop" class="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-3 rounded-xl shadow-lg transition-all transform hover:-translate-y-1 disabled:opacity-50">
+                إيقاف طارئ (STOP)
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // إعدادات HiveMQ
+        const broker = "broker.hivemq.com";
+        const port = 8884; // منفذ WebSockets الآمن (WSS) متوافق مع GitHub Pages
+        
+        // توليد ID عشوائي للعميل لتجنب التضارب
+        const clientId = "WebClient_" + Math.random().toString(16).substr(2, 8);
+        
+        // مواضيع MQTT (يمكنك تغييرها لاحقاً لضمان الخصوصية)
+        const topicCmd = "MySmartDoor_102030/cmd";
+        const topicStatus = "MySmartDoor_102030/status";
+
+        // متغير لتفعيل وضع المحاكاة في حال تم حظر الاتصال في بيئة المعاينة
+        let isSimulationMode = false;
+        let client;
+
+        try {
+            // إنشاء كائن الاتصال
+            client = new Paho.MQTT.Client(broker, port, clientId);
+
+            // ربط أحداث الاتصال
+            client.onConnectionLost = onConnectionLost;
+            client.onMessageArrived = onMessageArrived;
+        } catch(e) {
+            console.error("MQTT Client init failed:", e);
+        }
+
+        // خيارات الاتصال
+        const options = {
+            timeout: 3,
+            useSSL: true, // ضروري لـ GitHub Pages (HTTPS)
+            onSuccess: onConnect,
+            onFailure: onFailure
+        };
+
+        // بدء الاتصال مع معالجة الأخطاء الأمنية (مثل التي تحدث في بيئة المعاينة)
+        try {
+            console.log("Connecting to " + broker + "...");
+            if(client) {
+                client.connect(options);
+            } else {
+                enableSimulationMode();
+            }
+        } catch (error) {
+            console.warn("WebSocket is blocked in this environment. Switching to Simulation Mode.");
+            enableSimulationMode();
+        }
+
+        // دالة تفعيل وضع المحاكاة (تعمل فقط إذا تم حظر الاتصال)
+        function enableSimulationMode() {
+            isSimulationMode = true;
+            const statusEl = document.getElementById("mqtt-status");
+            statusEl.innerHTML = '<span class="w-3 h-3 rounded-full bg-blue-500 mr-2 ml-2"></span> وضع المحاكاة (Canvas)';
+            statusEl.classList.remove('text-red-500', 'text-yellow-500', 'text-green-500');
+            statusEl.classList.add('text-blue-500');
+            document.getElementById("door-status").innerText = "جاهز (محاكاة محليّة)";
+        }
+
+        // دالة عند نجاح الاتصال
+        function onConnect() {
+            console.log("Connected to HiveMQ via WebSockets!");
+            const statusEl = document.getElementById("mqtt-status");
+            statusEl.innerHTML = '<span class="w-3 h-3 rounded-full bg-green-500 mr-2 ml-2"></span> متصل';
+            statusEl.classList.remove('text-red-500', 'text-yellow-500');
+            statusEl.classList.add('text-green-500');
+            
+            // الاشتراك في موضوع الحالة لمعرفة ماذا يحدث للباب
+            client.subscribe(topicStatus);
+            document.getElementById("door-status").innerText = "في الانتظار...";
+        }
+
+        // دالة عند فشل الاتصال
+        function onFailure(message) {
+            console.log("Connection failed: " + message.errorMessage);
+            
+            // إذا فشل الاتصال لسبب أمني، نفعل وضع المحاكاة
+            if(message.errorCode === 8 || message.errorMessage.includes("Security")) {
+                enableSimulationMode();
+                return;
+            }
+
+            const statusEl = document.getElementById("mqtt-status");
+            statusEl.innerHTML = '<span class="w-3 h-3 rounded-full bg-red-500 mr-2 ml-2"></span> فشل الاتصال';
+            setTimeout(() => { if(!isSimulationMode) client.connect(options) }, 5000); // إعادة المحاولة بعد 5 ثوان
+        }
+
+        // دالة عند فقدان الاتصال
+        function onConnectionLost(responseObject) {
+            if (responseObject.errorCode !== 0) {
+                console.log("Connection lost: " + responseObject.errorMessage);
+                const statusEl = document.getElementById("mqtt-status");
+                statusEl.innerHTML = '<span class="w-3 h-3 rounded-full bg-yellow-500 mr-2 ml-2"></span> جاري إعادة الاتصال...';
+                statusEl.classList.remove('text-green-500');
+                statusEl.classList.add('text-yellow-500');
+                setTimeout(() => client.connect(options), 5000);
+            }
+        }
+
+        // دالة استقبال الرسائل من ESP32
+        function onMessageArrived(message) {
+            console.log("Message Arrived: " + message.payloadString);
+            const statusDiv = document.getElementById("door-status");
+            const payload = message.payloadString;
+
+            // تحديث واجهة المستخدم بناءً على الحالة
+            if(payload === "OPENING") statusDiv.innerText = "جاري الفتح ⏳";
+            else if(payload === "CLOSING") statusDiv.innerText = "جاري الغلق ⏳";
+            else if(payload === "OPENED") statusDiv.innerText = "الباب مفتوح بالكامل ✅";
+            else if(payload === "CLOSED") statusDiv.innerText = "الباب مغلق بالكامل 🔒";
+            else if(payload === "STOPPED") statusDiv.innerText = "متوقف 🛑";
+            else statusDiv.innerText = payload;
+            
+            statusDiv.classList.add('bg-blue-100');
+            setTimeout(() => statusDiv.classList.remove('bg-blue-100'), 500);
+        }
+
+        // دالة إرسال الأوامر
+        function sendCommand(cmd) {
+            // معالجة الأوامر في وضع المحاكاة
+            if (isSimulationMode) {
+                simulateCommandLocally(cmd);
+                return;
+            }
+
+            if (client && client.isConnected()) {
+                const message = new Paho.MQTT.Message(cmd);
+                message.destinationName = topicCmd;
+                client.send(message);
+                console.log("Command sent: " + cmd);
+            } else {
+                alert("يرجى الانتظار حتى يتم الاتصال بالسيرفر!");
+            }
+        }
+
+        // دالة لمحاكاة حركة الباب لتجربة الواجهة فقط
+        let simTimeout;
+        function simulateCommandLocally(cmd) {
+            const statusDiv = document.getElementById("door-status");
+            clearTimeout(simTimeout);
+            
+            if (cmd === 'OPEN') {
+                statusDiv.innerText = "جاري الفتح ⏳ (محاكاة)";
+                simTimeout = setTimeout(() => { statusDiv.innerText = "الباب مفتوح بالكامل ✅ (محاكاة)"; }, 2500);
+            } else if (cmd === 'CLOSE') {
+                statusDiv.innerText = "جاري الغلق ⏳ (محاكاة)";
+                simTimeout = setTimeout(() => { statusDiv.innerText = "الباب مغلق بالكامل 🔒 (محاكاة)"; }, 2500);
+            } else if (cmd === 'STOP') {
+                statusDiv.innerText = "متوقف 🛑 (محاكاة)";
+            }
+            
+            statusDiv.classList.add('bg-blue-100');
+            setTimeout(() => statusDiv.classList.remove('bg-blue-100'), 500);
+        }
+    </script>
+</body>
+</html>
